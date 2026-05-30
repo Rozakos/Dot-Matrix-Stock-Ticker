@@ -1,0 +1,4 @@
+.pio/
+.vscode/
+# Real credentials live in src/secrets.h — never commit them.
+src/secrets.h
