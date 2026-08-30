@@ -66,6 +66,94 @@ pipeline {
                          onlyIfSuccessful: true
       }
     }
+
+    // Publishing only happens for a tagged commit. Every push builds and
+    // archives into Jenkins; only `git tag -a v1.2.0 && git push origin v1.2.0`
+    // produces a GitHub Release. Otherwise every commit would create one.
+    //
+    // The tag is detected from the commit rather than from a branch spec, so
+    // this works whether the build was triggered by the tag push itself or by
+    // the push that preceded it.
+    stage('Publish GitHub Release') {
+      when {
+        expression {
+          env.RELEASE_TAG = sh(
+            script: "git tag --points-at HEAD | grep -E '^v' | head -1",
+            returnStdout: true
+          ).trim()
+          if (env.RELEASE_TAG) {
+            echo "HEAD is tagged ${env.RELEASE_TAG} - publishing a release"
+            return true
+          }
+          echo 'HEAD carries no v* tag - skipping release (this is the normal path)'
+          return false
+        }
+      }
+      steps {
+        withCredentials([string(credentialsId: 'github-pat', variable: 'GH_TOKEN')]) {
+          sh '''
+            set -eu
+            REPO="Rozakos/Dot-Matrix-Stock-Ticker"
+            API="https://api.github.com/repos/${REPO}"
+            ASSET="dot-matrix-stock-ticker-${RELEASE_TAG}.bin"
+            cp .pio/build/esp32/firmware.bin "${ASSET}"
+
+            # Idempotent: re-running a build on an already-released tag must not
+            # fail, and must not create a duplicate.
+            EXISTING=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+                        -H "Accept: application/vnd.github+json" \
+                        "${API}/releases/tags/${RELEASE_TAG}" \
+                        | sed -n 's/.*"id": \\([0-9]*\\).*/\\1/p' | head -1)
+
+            if [ -n "${EXISTING}" ]; then
+              echo "release for ${RELEASE_TAG} already exists (id ${EXISTING}) - reusing it"
+              RELEASE_ID="${EXISTING}"
+            else
+              SIZE=$(stat -c%s .pio/build/esp32/firmware.bin)
+              BODY="Automated build from Jenkins.\\n\\nfirmware.bin: ${SIZE} bytes\\nCommit: $(git rev-parse --short HEAD)"
+              RELEASE_ID=$(curl -sS -X POST \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -d "{\\"tag_name\\":\\"${RELEASE_TAG}\\",\\"name\\":\\"${RELEASE_TAG}\\",\\"body\\":\\"${BODY}\\"}" \
+                "${API}/releases" \
+                | sed -n 's/.*"id": \\([0-9]*\\).*/\\1/p' | head -1)
+              echo "created release id ${RELEASE_ID}"
+            fi
+
+            if [ -z "${RELEASE_ID}" ]; then
+              echo "FAILED: could not determine a release id"
+              exit 1
+            fi
+
+            # Replace the asset if a previous run of this tag already uploaded it.
+            OLD=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+                   -H "Accept: application/vnd.github+json" \
+                   "${API}/releases/${RELEASE_ID}/assets" \
+                   | tr "}" "\\n" | grep -F "\\"name\\": \\"${ASSET}\\"" \
+                   | sed -n 's/.*"id": \\([0-9]*\\).*/\\1/p' | head -1)
+            if [ -n "${OLD}" ]; then
+              echo "replacing existing asset ${OLD}"
+              curl -sS -X DELETE -H "Authorization: Bearer ${GH_TOKEN}" \
+                "${API}/releases/assets/${OLD}" >/dev/null
+            fi
+
+            HTTP=$(curl -sS -o /tmp/upload.json -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"${ASSET}" \
+              "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${ASSET}")
+
+            if [ "${HTTP}" != "201" ]; then
+              echo "FAILED: asset upload returned HTTP ${HTTP}"
+              head -c 400 /tmp/upload.json
+              exit 1
+            fi
+            echo "published ${ASSET} to release ${RELEASE_TAG}"
+            sed -n 's/.*"browser_download_url": "\\([^"]*\\)".*/  \\1/p' /tmp/upload.json | head -1
+          '''
+        }
+      }
+    }
   }
 
   post {
