@@ -63,6 +63,11 @@ void Ticker::render(const Quote& q) {
     snprintf(buf, sizeof(buf), "%.2f  %c%.2f%%",
              q.last, arrow, fabsf(q.changePct));
     bottom = buf;
+    // No successful update for this symbol in a while (API/WiFi down): say so
+    // instead of scrolling an old price as if it were live.
+    const uint32_t refreshMs = _settings.refreshSeconds() * 1000UL;
+    const uint32_t staleMs   = refreshMs * 4 > 300000UL ? refreshMs * 4 : 300000UL;
+    if (millis() - q.updatedMs > staleMs) bottom += "  STALE";
   } else {
     bottom = "no data";
   }

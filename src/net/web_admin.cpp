@@ -57,6 +57,9 @@ void begin(SettingsStore* settings) {
   g_server.on("/settings", HTTP_POST, [](AsyncWebServerRequest* req) {
     String api = req->hasParam("api_key", true) ? req->getParam("api_key", true)->value() : "";
     api.trim();
+    // The page never shows the token, so a blank field means "unchanged".
+    if (api.length() == 0) api = g_settings->apiKey();
+    else if (api == "-")   api = "";
     uint32_t refresh    = param_u32(req, "refresh_s",  cfg::DEFAULT_REFRESH_SECONDS);
     uint32_t dwell      = param_u32(req, "dwell_s",    cfg::DEFAULT_DWELL_SECONDS);
     uint32_t scroll     = param_u32(req, "scroll_ms",  cfg::DEFAULT_SCROLL_MS);

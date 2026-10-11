@@ -14,6 +14,8 @@
 
 namespace {
 
+bool g_sawResponse = false;
+
 bool fetchAndParse(const String& url, const String& token,
                    const JsonDocument& filter, JsonDocument& doc) {
   WiFiClientSecure client;
@@ -32,6 +34,7 @@ bool fetchAndParse(const String& url, const String& token,
   }
 
   int code = http.GET();
+  if (code > 0) g_sawResponse = true;
   if (code != 200) {
     log_w("HTTP %d %s", code, url.c_str());
     http.end();
@@ -55,16 +58,22 @@ namespace fetcher {
 // GET /stock/{symbol} -> { last, change_pct, ... }
 bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   auto syms = settings.symbols();
-  if (syms.empty()) return false;
   String token = settings.apiKey();
-  if (!token.length()) {
-    log_w("no api token configured");
+  if (syms.empty() || !token.length()) {
+    // Nothing to fetch is a configuration state, not a dead network: report
+    // it as "responded" so the watchdog never reboot-loops an unset device.
+    g_sawResponse = true;
+    if (!token.length()) log_w("no api token configured");
     return false;
   }
 
   JsonDocument filter;
   filter["last"]       = true;
   filter["change_pct"] = true;
+
+  g_sawResponse = false;
+  const std::vector<Quote> previous = store.snapshot();
+  size_t fetched = 0;
 
   std::vector<Quote> out;
   out.reserve(syms.size());
@@ -80,9 +89,17 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
       q.changePct = doc["change_pct"] | NAN;
       q.fresh     = !isnan(q.last) && !isnan(q.changePct);
       if (q.fresh) {
+        q.updatedMs = millis();
+        ++fetched;
         log_i("[%s] %.2f (%+.2f%%)", sym.c_str(), q.last, q.changePct);
       } else {
         log_w("[%s] missing last/change_pct", sym.c_str());
+      }
+    }
+    if (!q.fresh) {
+      // Keep the last good price rather than blanking it on a transient error.
+      for (const auto& p : previous) {
+        if (p.symbol == sym && p.fresh) { q = p; break; }
       }
     }
     out.push_back(q);
@@ -94,7 +111,9 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   time_t now;
   time(&now);
   store.setQuotes(std::move(out), now);
-  return true;
+  return fetched > 0;
 }
+
+bool sawHttpResponseThisCycle() { return g_sawResponse; }
 
 }  // namespace fetcher

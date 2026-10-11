@@ -11,6 +11,10 @@ struct Quote {
   float  last      = NAN;
   float  changePct = NAN;
   bool   fresh     = false;  // true when last & changePct are both valid
+  // millis() of the last successful fetch of THIS symbol. A symbol whose fetch
+  // fails keeps its previous good price; the ticker marks it STALE once this
+  // gets old (millis, not epoch, so an NTP sync can't fake an age).
+  uint32_t updatedMs = 0;
 };
 
 // Thread-safe snapshot store. The NET task writes the latest quotes; the

@@ -101,7 +101,8 @@ void netTask(void*) {
 
   if (wifi_mgr::connected()) bringUpStaServices();
 
-  uint32_t lastFetch = 0;
+  uint32_t lastFetch  = 0;
+  uint8_t  deadCycles = 0;   // consecutive fetch cycles with no HTTP response at all
   for (;;) {
     captive_portal::loop();
 
@@ -114,6 +115,16 @@ void netTask(void*) {
         } else {
           // Retry sooner than a full interval after a failed batch.
           lastFetch = millis() - (g_settings.refreshSeconds() * 1000UL) + 5000;
+        }
+        // lwIP can wedge with WiFi still associated: every connect then times
+        // out forever. Nothing but a reboot recovers it (same watchdog as
+        // CYD-Stock-Ticker); any HTTP status, even 401, resets the count.
+        if (fetcher::sawHttpResponseThisCycle()) {
+          deadCycles = 0;
+        } else if (++deadCycles >= 10) {
+          log_e("[net] no HTTP response for %u fetch cycles; rebooting", deadCycles);
+          delay(200);
+          ESP.restart();
         }
       }
     } else if (wifi_mgr::apActive() && !ap_mode_was) {
