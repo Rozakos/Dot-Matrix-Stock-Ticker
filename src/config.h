@@ -8,11 +8,26 @@ namespace cfg {
 // bot-fight blocks empty/default User-Agents, so requests MUST send a
 // non-empty User-Agent — see API_USER_AGENT.
 inline constexpr const char* API_BASE       = "https://rozakos.eu/stocks/api/v1";
-inline constexpr const char* API_USER_AGENT = "DotMatrix-Stock-Ticker/1.0 (ESP32)";
+inline constexpr const char* FIRMWARE_VERSION = "1.1.0";
+#ifdef DISPLAY_OLED
+inline constexpr const char* DEVICE_NAME = "OLED Stock Ticker";
+inline constexpr const char* DEVICE_TYPE = "oled_stock_ticker";
+inline constexpr const char* DEVICE_PREFIX = "oled-ticker-";
+#else
+inline constexpr const char* DEVICE_NAME = "Dot-Matrix Stock Ticker";
+inline constexpr const char* DEVICE_TYPE = "dot_matrix_stock_ticker";
+inline constexpr const char* DEVICE_PREFIX = "dot-ticker-";
+#endif
+inline constexpr const char* API_USER_AGENT = "DotMatrix-Stock-Ticker/1.1 (ESP32)";
+inline constexpr size_t MAX_SYMBOLS = 16;
 // Eastern European time with DST: UTC+2 winter, UTC+3 summer.
 inline constexpr const char* TIME_TZ        = "EET-2EEST,M3.5.0/3,M10.5.0/4";
 
+#ifdef DISPLAY_OLED
+inline constexpr const char* DEFAULT_SYMBOLS = "NVDA,INTC,AMD";
+#else
 inline constexpr const char* DEFAULT_SYMBOLS = "AAPL,MSFT,NVDA,TSLA";
+#endif
 
 inline constexpr uint32_t DEFAULT_REFRESH_SECONDS = 20;
 inline constexpr uint32_t MIN_REFRESH_SECONDS     = 15;

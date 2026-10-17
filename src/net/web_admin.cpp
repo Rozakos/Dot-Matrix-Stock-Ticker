@@ -6,6 +6,8 @@
 #include "../config.h"
 #include "../settings/settings_store.h"
 #include "web_admin_page.h"
+#include "local_protocol.h"
+#include "iot_bridge.h"
 
 namespace {
 
@@ -43,8 +45,10 @@ uint32_t param_u32(AsyncWebServerRequest* req, const char* name, uint32_t dflt) 
 
 namespace web_admin {
 
-void begin(SettingsStore* settings) {
+void begin(SettingsStore* settings, QuoteStore* quotes) {
   g_settings = settings;
+  local_protocol::begin(g_server, *settings, *quotes);
+  iot_bridge::begin(g_server, *settings, *quotes);
 
   g_server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
     redirect_to_settings(req);
@@ -80,7 +84,7 @@ void begin(SettingsStore* settings) {
       for (const auto& existing : syms) {
         if (existing == sym) { exists = true; break; }
       }
-      if (!exists) {
+      if (!exists && syms.size() < cfg::MAX_SYMBOLS && local_protocol::validSymbol(sym)) {
         syms.push_back(sym);
         save_symbols(syms);
       }
@@ -91,7 +95,7 @@ void begin(SettingsStore* settings) {
   g_server.on("/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
     int idx = req->hasParam("i", true) ? req->getParam("i", true)->value().toInt() : -1;
     auto syms = g_settings->symbols();
-    if (idx >= 0 && (size_t)idx < syms.size()) {
+    if (idx >= 0 && (size_t)idx < syms.size() && syms.size() > 1) {
       syms.erase(syms.begin() + idx);
       save_symbols(syms);
     }

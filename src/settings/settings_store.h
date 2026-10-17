@@ -5,6 +5,7 @@
 #include <freertos/semphr.h>
 
 #include <vector>
+#include <atomic>
 
 class SettingsStore {
  public:
@@ -23,6 +24,7 @@ class SettingsStore {
   uint32_t dwellSeconds() const;   // per-symbol dwell before advancing
   uint16_t scrollSpeedMs() const;  // MD_Parola frame delay (lower = faster)
   uint8_t  brightness() const;     // MAX7219 intensity 0..15
+  uint32_t revision() const { return _revision.load(); }
 
   String   wifiSsid() const;
   String   wifiPass() const;
@@ -43,6 +45,7 @@ class SettingsStore {
   void save() const;
 
   mutable SemaphoreHandle_t _mu = nullptr;
+  std::atomic<uint32_t> _revision{0};
   String   _apiKey;
   uint32_t _refresh    = 60;
   String   _symbolsCsv;

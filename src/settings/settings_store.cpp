@@ -171,13 +171,12 @@ void SettingsStore::update(const String& apiKey,
                            uint8_t  brightness) {
   xSemaphoreTake(_mu, portMAX_DELAY);
   _apiKey     = apiKey;
-  _refresh    = refreshSeconds < cfg::MIN_REFRESH_SECONDS
-                    ? cfg::MIN_REFRESH_SECONDS
-                    : refreshSeconds;
+  _refresh    = clamp_u32(refreshSeconds, cfg::MIN_REFRESH_SECONDS, 3600);
   _symbolsCsv = symbolsCsv;
   _dwell      = clamp_u32(dwellSeconds, cfg::MIN_DWELL_SECONDS, cfg::MAX_DWELL_SECONDS);
   _scrollMs   = (uint16_t)clamp_u32(scrollSpeedMs, cfg::MIN_SCROLL_MS, cfg::MAX_SCROLL_MS);
   _brightness = (uint8_t)clamp_u32(brightness, 0, cfg::MAX_BRIGHTNESS);
   save();
+  ++_revision;
   xSemaphoreGive(_mu);
 }

@@ -11,6 +11,7 @@
 #include "../config.h"
 #include "../settings/settings_store.h"
 #include "quote_store.h"
+#include "root_ca.h"
 
 namespace {
 
@@ -19,7 +20,7 @@ bool g_sawResponse = false;
 bool fetchAndParse(const String& url, const String& token,
                    const JsonDocument& filter, JsonDocument& doc) {
   WiFiClientSecure client;
-  client.setInsecure();              // server cert not pinned on-device
+  client.setCACert(ROOT_CA);
   HTTPClient http;
   http.setTimeout(10000);
   http.setReuse(false);
@@ -55,7 +56,7 @@ bool fetchAndParse(const String& url, const String& token,
 
 namespace fetcher {
 
-// GET /stock/{symbol} -> { last, change_pct, ... }
+// One batch request (max 16) shares the server's quote cache and poller.
 bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   auto syms = settings.symbols();
   String token = settings.apiKey();
@@ -67,9 +68,18 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
     return false;
   }
 
+  // Certificate validity needs a real clock. NTP is started at WiFi connect;
+  // waiting for it is not a network failure and must not trip the watchdog.
+  if (time(nullptr) < 1700000000) {
+    g_sawResponse = true;
+    return false;
+  }
+
   JsonDocument filter;
-  filter["last"]       = true;
-  filter["change_pct"] = true;
+  auto fields = filter["quotes"][0].to<JsonObject>();
+  for (const char* key : {"symbol", "last", "change_pct", "market_state",
+                          "pre_market", "pre_market_change_pct",
+                          "post_market", "post_market_change_pct"}) fields[key] = true;
 
   g_sawResponse = false;
   const std::vector<Quote> previous = store.snapshot();
@@ -78,16 +88,30 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   std::vector<Quote> out;
   out.reserve(syms.size());
 
+  String url = String(cfg::API_BASE) + "/stocks?symbols=";
+  for (size_t i = 0; i < syms.size() && i < cfg::MAX_SYMBOLS; ++i) {
+    if (i) url += ',';
+    String encoded = syms[i];
+    encoded.replace("^", "%5E");
+    url += encoded;
+  }
+  JsonDocument doc;
+  const bool ok = fetchAndParse(url, token, filter, doc);
+
   for (const auto& sym : syms) {
     Quote q;
     q.symbol = sym;
 
-    String url = String(cfg::API_BASE) + "/stock/" + sym;
-    JsonDocument doc;
-    if (fetchAndParse(url, token, filter, doc)) {
-      q.last      = doc["last"]       | NAN;
-      q.changePct = doc["change_pct"] | NAN;
-      q.fresh     = !isnan(q.last) && !isnan(q.changePct);
+    if (ok) for (JsonObject item : doc["quotes"].as<JsonArray>()) {
+      if (item["symbol"].as<String>() != sym) continue;
+      q.last      = item["last"].is<float>() ? item["last"].as<float>() : NAN;
+      q.changePct = item["change_pct"].is<float>() ? item["change_pct"].as<float>() : NAN;
+      q.fresh     = isfinite(q.last) && isfinite(q.changePct);
+      q.marketState = item["market_state"] | "";
+      const char* priceKey = q.marketState == "PRE" ? "pre_market" : "post_market";
+      const char* changeKey = q.marketState == "PRE" ? "pre_market_change_pct" : "post_market_change_pct";
+      q.extPrice = item[priceKey].is<float>() ? item[priceKey].as<float>() : NAN;
+      q.extChangePct = item[changeKey].is<float>() ? item[changeKey].as<float>() : NAN;
       if (q.fresh) {
         q.updatedMs = millis();
         ++fetched;
@@ -95,6 +119,7 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
       } else {
         log_w("[%s] missing last/change_pct", sym.c_str());
       }
+      break;
     }
     if (!q.fresh) {
       // Keep the last good price rather than blanking it on a transient error.
@@ -103,13 +128,9 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
       }
     }
     out.push_back(q);
-    // Gentle on the API, and a yield point so a long symbol list never
-    // starves the rest of the NET task between blocking TLS round-trips.
-    vTaskDelay(pdMS_TO_TICKS(150));
   }
 
-  time_t now;
-  time(&now);
+  time_t now = fetched ? time(nullptr) : store.lastUpdate();
   store.setQuotes(std::move(out), now);
   return fetched > 0;
 }

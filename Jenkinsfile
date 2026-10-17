@@ -1,4 +1,4 @@
-// CI for the dot-matrix stock ticker (ESP32).
+// CI for the matrix and SSD1306 OLED stock tickers (ESP32).
 //
 // Runs on the self-hosted Jenkins controller as a MULTIBRANCH pipeline, which
 // matters for one specific reason: Jenkins' git polling uses `git ls-remote -h`,
@@ -39,34 +39,17 @@ pipeline {
       }
     }
 
-    stage('Stub secrets.h') {
+    // A clean checkout builds without secrets.h and enters Wi-Fi setup.
+    stage('Build production firmware') {
       steps {
-        // src/secrets.h is gitignored - .gitignore says so in as many words:
-        // "Real credentials live in src/secrets.h - never commit them." So a
-        // clean clone cannot compile without it, and CI copies the committed
-        // template exactly as the README tells a human to.
-        //
-        // This proves the code COMPILES. The artifact holds placeholder
-        // credentials and is not a drop-in image for a real network.
-        sh '''
-          if [ ! -f src/secrets.h ]; then
-            cp src/secrets_example.h src/secrets.h
-            echo "secrets.h stubbed from secrets_example.h"
-          fi
-        '''
-      }
-    }
-
-    stage('Build firmware (esp32)') {
-      steps {
-        sh 'pio run -e esp32'
+        sh 'pio run -e esp32 -e esp32-oled'
       }
     }
 
     stage('Archive firmware') {
       steps {
-        sh 'ls -lh .pio/build/esp32/firmware.bin'
-        archiveArtifacts artifacts: '.pio/build/esp32/firmware.*',
+        sh 'ls -lh .pio/build/esp32/firmware.bin .pio/build/esp32-oled/firmware.bin'
+        archiveArtifacts artifacts: '.pio/build/esp32/firmware.*, .pio/build/esp32-oled/firmware.*',
                          fingerprint: true,
                          onlyIfSuccessful: true
       }
@@ -89,6 +72,12 @@ pipeline {
               --repo Rozakos/Dot-Matrix-Stock-Ticker \
               --tag "${TAG_NAME}" \
               --asset "$ASSET"
+            OLED_ASSET="oled-stock-ticker-${TAG_NAME}.bin"
+            cp .pio/build/esp32-oled/firmware.bin "$OLED_ASSET"
+            python3 scripts/publish_release.py \
+              --repo Rozakos/Dot-Matrix-Stock-Ticker \
+              --tag "${TAG_NAME}" \
+              --asset "$OLED_ASSET"
           '''
         }
       }
@@ -98,10 +87,12 @@ pipeline {
   post {
     always {
       sh '''
-        if [ -f .pio/build/esp32/firmware.bin ]; then
-          size=$(stat -c%s .pio/build/esp32/firmware.bin)
-          echo "firmware.bin = ${size} bytes ($((size / 1024)) KB) against the min_spiffs app slot - see the Flash: line above"
-        fi
+        for target in esp32 esp32-oled; do
+          if [ -f ".pio/build/${target}/firmware.bin" ]; then
+            size=$(stat -c%s ".pio/build/${target}/firmware.bin")
+            echo "${target}: firmware.bin = ${size} bytes ($((size / 1024)) KB) - see its Flash: line above"
+          fi
+        done
       '''
     }
     cleanup {

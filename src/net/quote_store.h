@@ -15,6 +15,9 @@ struct Quote {
   // fails keeps its previous good price; the ticker marks it STALE once this
   // gets old (millis, not epoch, so an NTP sync can't fake an age).
   uint32_t updatedMs = 0;
+  String marketState;
+  float extPrice = NAN;
+  float extChangePct = NAN;
 };
 
 // Thread-safe snapshot store. The NET task writes the latest quotes; the

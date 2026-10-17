@@ -5,19 +5,34 @@
 #include <time.h>
 
 #include "config.h"
+#ifdef DISPLAY_OLED
+#include "display/oled_display.h"
+#else
 #include "display/parola_display.h"
+#endif
 #include "net/captive_portal.h"
+#include "net/iot_bridge.h"
 #include "net/quote_fetcher.h"
 #include "net/quote_store.h"
 #include "net/web_admin.h"
 #include "net/wifi_mgr.h"
+#if __has_include("secrets.h")
 #include "secrets.h"
+#else
+constexpr const char* WIFI_SSID = "";
+constexpr const char* WIFI_PASS = "";
+constexpr const char* API_TOKEN_SEED = "";
+#endif
 #include "settings/settings_store.h"
 #include "ticker/ticker.h"
 
 namespace {
 
+#ifdef DISPLAY_OLED
+OledDisplay g_display;
+#else
 ParolaDisplay g_display;
+#endif
 SettingsStore g_settings;
 QuoteStore    g_quoteStore;
 
@@ -95,19 +110,24 @@ void netTask(void*) {
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     setenv("TZ", cfg::TIME_TZ, 1);
     tzset();
-    web_admin::begin(&g_settings);
+    web_admin::begin(&g_settings, &g_quoteStore);
     sta_services_up = true;
   };
 
   if (wifi_mgr::connected()) bringUpStaServices();
 
   uint32_t lastFetch  = 0;
+  uint32_t settingsRevision = g_settings.revision();
   uint8_t  deadCycles = 0;   // consecutive fetch cycles with no HTTP response at all
   for (;;) {
     captive_portal::loop();
 
     if (wifi_mgr::connected()) {
       bringUpStaServices();
+      if (settingsRevision != g_settings.revision()) {
+        settingsRevision = g_settings.revision();
+        lastFetch = 0;
+      }
       if (lastFetch == 0 ||
           millis() - lastFetch > g_settings.refreshSeconds() * 1000UL) {
         if (fetcher::fetchQuotes(g_settings, g_quoteStore)) {
@@ -141,7 +161,7 @@ void netTask(void*) {
 void setup() {
   Serial.begin(115200);
   delay(50);
-  log_i("Dot-matrix stock ticker starting");
+  log_i("%s %s starting", cfg::DEVICE_NAME, cfg::FIRMWARE_VERSION);
 
   if (!LittleFS.begin(true)) {
     log_e("LittleFS mount failed");
