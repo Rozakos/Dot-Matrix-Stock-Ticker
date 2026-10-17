@@ -22,6 +22,14 @@ messages (WebSocket messages each contain one JSON object). The optional
 `esp32-oled-test` build adds the localhost USB HTTP diagnostics used by
 `scripts/usb_http_bridge.py`; use `esp32-oled` for normal operation.
 
+Firmware **1.2.0** uses the reusable RozakosIoT library (vendored in
+`lib/RozakosIoT`). The app and board now support optional cloud enrollment:
+sign in, choose the local device's Link to cloud action, hold BOOT three
+seconds, and enter its displayed setup code. The board connects through
+verified TLS to iot.rozakos.eu; local/Home endpoints and settings remain.
+Hold BOOT ten seconds to clear only cloud credentials after removing the
+cloud device from its account. Wi-Fi and watchlist remain unchanged.
+
 Run `python scripts/hardware_smoke.py http://<device-ip>` to check the Home
 protocol against hardware. It restores the original watchlist and refresh.
 See [integration and setup details](docs/integration.md) and

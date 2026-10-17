@@ -1,4 +1,5 @@
 #include "iot_bridge.h"
+#include <RozakosIoT.h>
 #include <ArduinoJson.h>
 #include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
@@ -13,13 +14,9 @@
 #endif
 
 namespace {
-AsyncWebServer wsServer(81);
-AsyncWebSocket socket("/");
+RozakosIoT iot;
 SettingsStore* settings = nullptr;
 QuoteStore* quotes = nullptr;
-String serialLine;
-bool serialOverflow = false;
-uint32_t lastPush = 0;
 
 void ioTask(void*) {
   for (;;) {
@@ -115,7 +112,7 @@ void state(JsonDocument& doc) {
 }
 
 // Validate before committing so a rejected command never changes settings.
-const char* command(JsonVariantConst body) {
+const char* command(JsonVariantConst body, bool apply = true) {
   if (!body.is<JsonObjectConst>() || !body["pin"].is<const char*>()) return "Expected pin and value";
   String pin = body["pin"].as<String>();
   String csv = web_admin_page::symbols_csv(*settings);
@@ -152,110 +149,38 @@ const char* command(JsonVariantConst body) {
     else if (pin == "scroll_ms" && value >= 10 && value <= 150) scroll = value;
     else return "Unknown/read-only pin or value out of range";
   }
-  settings->update(settings->apiKey(), refresh, csv, dwell, scroll, brightness);
+  if (apply) settings->update(settings->apiKey(), refresh, csv, dwell, scroll, brightness);
   return nullptr;
 }
 
-void push(AsyncWebSocketClient* client = nullptr, bool serial = false) {
-  JsonDocument snapshot;
-  state(snapshot);
-  for (JsonPair field : snapshot.as<JsonObject>()) {
-    JsonDocument frame;
-    frame["pin"] = field.key().c_str();
-    frame["value"] = field.value();
-    String body;
-    serializeJson(frame, body);
-    if (client) client->text(body);
-    else socket.textAll(body);
-    if (serial) Serial.println(body);
-  }
-}
-}
+} // namespace
 
 namespace iot_bridge {
 void begin(AsyncWebServer& server, SettingsStore& settingsStore, QuoteStore& quoteStore) {
   settings = &settingsStore;
   quotes = &quoteStore;
-  server.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
-    JsonDocument doc, snapshot;
-    doc["name"] = cfg::DEVICE_NAME;
-    doc["type"] = cfg::DEVICE_TYPE;
-    doc["fw"] = cfg::FIRMWARE_VERSION;
-    auto pins = doc["pins"].to<JsonArray>();
-    state(snapshot);
-    const size_t count = settings->symbols().size();
-    for (JsonPair field : snapshot.as<JsonObject>()) {
-      String key = field.key().c_str();
-      if (key.startsWith("symbol_") || key.startsWith("price_") ||
-          key.startsWith("change_pct_") || key.startsWith("fresh_")) {
-        if (size_t(key.substring(key.lastIndexOf('_') + 1).toInt()) >= count) continue;
-      }
-      pins.add(key);
-    }
-    auto* response = req->beginResponseStream("application/json");
-    serializeJson(doc, *response); req->send(response);
-  });
-  server.on("/state", HTTP_GET, [](AsyncWebServerRequest* req) {
-    JsonDocument doc; state(doc);
-    auto* response = req->beginResponseStream("application/json");
-    response->addHeader("Cache-Control", "no-store");
-    serializeJson(doc, *response); req->send(response);
-  });
-  auto* handler = new AsyncCallbackJsonWebHandler("/command",
-      [](AsyncWebServerRequest* req, JsonVariant& body) {
-    const char* error = command(body);
-    JsonDocument result;
-    if (error) result["error"] = error;
-    else result["ok"] = true;
-    String json; serializeJson(result, json);
-    req->send(error ? 400 : 200, "application/json", json);
-  });
-  handler->setMethod(HTTP_POST);
-  handler->setMaxContentLength(512);
-  server.addHandler(handler);
-  socket.onEvent([](AsyncWebSocket*, AsyncWebSocketClient* client,
-                    AwsEventType type, void*, uint8_t*, size_t) {
-    if (type == WS_EVT_CONNECT) push(client);
-  });
-  wsServer.addHandler(&socket);
-  wsServer.begin();
-  // USB commands and LAN push stay responsive while the quote task is in TLS.
-  xTaskCreatePinnedToCore(ioTask, "iot", 8192, nullptr, 1, nullptr, 0);
-}
-
-void loop() {
-  if (!settings) return;
-  // USB serial uses the same pin/value contract as LAN. Ignore non-JSON lines;
-  // drop an overlong line in its entirety rather than executing a suffix.
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == '\n') {
-      if (!serialOverflow && serialLine.startsWith("{")) {
-        JsonDocument doc;
-        auto parseError = deserializeJson(doc, serialLine);
+  iot.identity(cfg::DEVICE_NAME, cfg::DEVICE_TYPE);
+  JsonDocument snapshot;
+  state(snapshot);
+  for (JsonPair item : snapshot.as<JsonObject>()) iot.pin(item.key().c_str());
+  iot.onSnapshot(state);
+  auto apply = [](const String& pin, JsonVariantConst value, bool commit) -> const char* {
+    JsonDocument doc; doc["pin"] = pin; doc["value"] = value;
+    return command(doc.as<JsonVariantConst>(), commit);
+  };
+  iot.onCommand([apply](const String& pin, JsonVariantConst value) { return apply(pin, value, true); });
+  iot.onValidate([apply](const String& pin, JsonVariantConst value) { return apply(pin, value, false); });
 #ifdef USB_HTTP_DIAGNOSTICS
-        if (!parseError && doc["http"].is<JsonObject>()) {
-          diagnosticHttp(doc["http"]);
-          serialLine = ""; serialOverflow = false;
-          continue;
-        }
+  iot.onSerialRequest([](JsonVariantConst input) {
+    if (!input["http"].is<JsonObjectConst>()) return false;
+    diagnosticHttp(input["http"]); return true;
+  });
 #endif
-        const char* error = parseError ? "Invalid JSON" : command(doc.as<JsonVariantConst>());
-        JsonDocument result;
-        if (error) result["error"] = error;
-        else { result["pin"] = doc["pin"]; result["value"] = doc["value"]; }
-        serializeJson(result, Serial); Serial.println();
-      }
-      serialLine = ""; serialOverflow = false;
-    } else if (c != '\r' && !serialOverflow) {
-      if (serialLine.length() >= 512) { serialLine = ""; serialOverflow = true; }
-      else serialLine += c;
-    }
-  }
-  if (millis() - lastPush >= 2000) {
-    lastPush = millis();
-    socket.cleanupClients(4);
-    push(nullptr, true);
-  }
+  iot.begin(&server, false); // Keep the ticker's existing Wi-Fi/Home settings.
+  xTaskCreatePinnedToCore(ioTask, "iot", 16384, nullptr, 1, nullptr, 0);
 }
-}
+void loop() { iot.loop(); }
+String setupCode() { return iot.setupCode(); }
+bool pairingActive() { return iot.pairingActive(); }
+uint32_t pairingRemainingMs() { return iot.pairingRemainingMs(); }
+} // namespace iot_bridge

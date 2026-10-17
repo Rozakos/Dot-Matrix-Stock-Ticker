@@ -57,11 +57,18 @@ void displayTask(void*) {
 
   Ticker ticker(g_display, g_quoteStore, g_settings);
 
-  enum class Mode { None, Setup, Connecting, Run };
+  enum class Mode { None, Setup, Pair, Connecting, Run };
   Mode mode = Mode::None;
 
   for (;;) {
-    if (wifi_mgr::apActive()) {
+    if (iot_bridge::pairingRemainingMs() > 110000 && !iot_bridge::setupCode().isEmpty()) {
+      if (mode != Mode::Pair) {
+        mode = Mode::Pair;
+        g_display.setZone(IDisplay::ZONE_TOP, "IOT SETUP", false);
+        g_display.setZone(IDisplay::ZONE_BOTTOM, iot_bridge::setupCode(), false);
+      }
+      g_display.animate();
+    } else if (wifi_mgr::apActive()) {
       // First-run setup: tell the user which AP to join.
       if (mode != Mode::Setup) {
         mode = Mode::Setup;

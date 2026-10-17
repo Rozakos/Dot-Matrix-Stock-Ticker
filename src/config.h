@@ -8,7 +8,7 @@ namespace cfg {
 // bot-fight blocks empty/default User-Agents, so requests MUST send a
 // non-empty User-Agent — see API_USER_AGENT.
 inline constexpr const char* API_BASE       = "https://rozakos.eu/stocks/api/v1";
-inline constexpr const char* FIRMWARE_VERSION = "1.1.0";
+inline constexpr const char* FIRMWARE_VERSION = "1.2.0";
 #ifdef DISPLAY_OLED
 inline constexpr const char* DEVICE_NAME = "OLED Stock Ticker";
 inline constexpr const char* DEVICE_TYPE = "oled_stock_ticker";

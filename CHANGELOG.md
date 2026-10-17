@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 - 2026-10-17
+
+- Use vendored RozakosIoT ESP32 library for local/USB and TLS cloud virtual pins.
+- Physical setup code, short-lived account enrollment, persisted credentials and reconnect.
+- Keep Home protocol, Wi-Fi, watchlist, display controls and stock API key intact.
+- BOOT three seconds opens setup; ten seconds clears cloud credentials only.
+
+
+
 ## 1.1.0 — 2026-10-17
 
 - Add an ESP32/SSD1306 128×64 OLED target on SDA 21/SCL 22, probing 0x3c/0x3d.
