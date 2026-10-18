@@ -111,7 +111,7 @@ void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
   _http->on("/info", HTTP_GET, [this](AsyncWebServerRequest* req) {
     JsonDocument doc;
     doc["name"] = _name; doc["type"] = _type; doc["hardwareId"] = _hardwareId;
-    doc["protocol"] = 1; doc["sdk"] = "0.2.0";
+    doc["protocol"] = 1; doc["sdk"] = "0.2.1";
     auto pins = doc["pins"].to<JsonArray>(); for (const auto& item : _pins) pins.add(item.name);
     auto caps = doc["capabilities"].to<JsonArray>(); caps.add("enrollment"); caps.add("device-proof"); caps.add("local"); caps.add("cloud");
     if (!_localSecret.isEmpty()) caps.add("local-password");
@@ -225,10 +225,10 @@ void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
   if (!existingServer) _http->begin();
 }
 void RozakosIoT::startClaim() {
-  if (_claim || _job != "pending" || _ticket.isEmpty()) return;
-  if (!save()) { _error = "Could not persist enrollment. Retry after checking device storage."; _job = "error"; return; }
   JsonDocument doc;
   xSemaphoreTake(_mutex, portMAX_DELAY);
+  if (_claim || _job != "pending" || _ticket.isEmpty()) { xSemaphoreGive(_mutex); return; }
+  if (!save()) { _error = "Could not persist enrollment. Retry after checking device storage."; _job = "error"; xSemaphoreGive(_mutex); return; }
   doc["hardwareId"] = _hardwareId; doc["deviceType"] = _type;
   doc["token"] = _ticket; doc["receipt"] = _receipt;
   xSemaphoreGive(_mutex);
@@ -236,7 +236,8 @@ void RozakosIoT::startClaim() {
   _claim = new Claim();
   serializeJson(doc, _claim->body);
   if (xTaskCreate(claimTask, "rozakos-claim", 12288, _claim, 1, nullptr) != pdPASS) {
-    delete _claim; _claim = nullptr; _error = "Device busy; retrying enrollment.";
+    delete _claim; _claim = nullptr;
+    xSemaphoreTake(_mutex, portMAX_DELAY); _error = "Device busy; retrying enrollment."; xSemaphoreGive(_mutex);
   }
 }
 void RozakosIoT::claimTask(void* argument) {
@@ -266,18 +267,21 @@ void RozakosIoT::finishClaim() {
     String oldTicket = _ticket; _ticket = "";
     if (save()) { _job = "complete"; _pairUntil = 0; _error = ""; }
     else { _key = ""; _deviceId = ""; _ticket = oldTicket; _error = "Storage failed; retrying enrollment."; }
-  } else if (status >= 400 && status < 500) {
+  } else if (status >= 400 && status < 500 && status != 408 && status != 429) {
     _error = reply["error"] | "Enrollment rejected. Start again in the app.";
     _job = "error"; _ticket = ""; _receipt = ""; save();
-  } else _error = "Cloud unavailable; retrying with the same enrollment.";
+  } else _error = status == 429 ? "Cloud busy; retrying with the same enrollment." : "Cloud unavailable; retrying with the same enrollment.";
   xSemaphoreGive(_mutex);
 }
 void RozakosIoT::serialLine(const String& line) {
   if (line == "IOT_SETUP") { openPairing(); return; }
   if (line == "IOT_RESET_CLOUD") {
     _cloud.disconnect(); _cloudStarted = false; _welcomed = false;
+    xSemaphoreTake(_mutex, portMAX_DELAY);
     _key = ""; _deviceId = ""; _ticket = ""; _receipt = ""; _job = "idle"; _error = "";
-    save(); openPairing(); Serial.println("[Rozakos] Cloud credentials cleared; Wi-Fi and hardware settings preserved."); return;
+    save();
+    xSemaphoreGive(_mutex);
+    openPairing(); Serial.println("[Rozakos] Cloud credentials cleared; Wi-Fi and hardware settings preserved."); return;
   }
   if (!line.startsWith("{")) return;
   JsonDocument doc;
@@ -331,11 +335,15 @@ void RozakosIoT::loop() {
     if (time(nullptr) < 1700000000) { if (millis() - _lastWifi > 10000) { configTime(0, 0, "pool.ntp.org", "time.nist.gov"); _lastWifi = millis(); } }
     else {
       if (_claim && _claim->done.load()) finishClaim();
-      if (_job == "pending" && !_claim && (!_lastClaim || millis() - _lastClaim > 10000)) { _lastClaim = millis(); startClaim(); }
-      if (!_key.isEmpty() && !_cloudStarted) {
+      xSemaphoreTake(_mutex, portMAX_DELAY);
+      const bool pending = _job == "pending";
+      const String key = _key;
+      xSemaphoreGive(_mutex);
+      if (pending && !_claim && (!_lastClaim || millis() - _lastClaim > 10000)) { _lastClaim = millis(); startClaim(); }
+      if (!key.isEmpty() && !_cloudStarted) {
         _cloudStarted = true;
         _cloud.beginSslWithCA(HOST, 443, "/ws/device", ROZAKOS_ROOTS, "");
-        String headers = "X-Device-Key: " + _key + "\r\nUser-Agent: RozakosIoT/0.1";
+        String headers = "X-Device-Key: " + key + "\r\nUser-Agent: RozakosIoT/0.2";
         _cloud.setExtraHeaders(headers.c_str()); _cloud.setReconnectInterval(10000); _cloud.enableHeartbeat(20000, 5000, 2);
       }
       if (_cloudStarted) _cloud.loop();

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2 - 2026-10-18
+
+- RozakosIoT library 0.2.1: a transient cloud error (rate limit, server hiccup) during linking
+  is retried instead of discarding the enrollment; the BOOT/USB cloud reset no longer races
+  the HTTP handlers.
+
 ## 1.2.1 - 2026-10-18
 
 - RozakosIoT library 0.2.0: cloud linking binds the ticket to a receipt only the board knows
