@@ -7,6 +7,7 @@
 #include <ESPmDNS.h>
 #include <esp_system.h>
 #include <time.h>
+#include <mbedtls/sha256.h>
 
 namespace {
 constexpr const char* HOST = "iot.rozakos.eu";
@@ -14,6 +15,19 @@ String randomHex() {
   char out[65];
   for (size_t i = 0; i < 8; ++i) snprintf(out + i * 8, 9, "%08x", esp_random());
   return String(out);
+}
+String sha256Hex(const String& value) {
+  uint8_t digest[32];
+  mbedtls_sha256(reinterpret_cast<const unsigned char*>(value.c_str()), value.length(), digest, 0);
+  char out[65];
+  for (size_t i = 0; i < 32; ++i) snprintf(out + i * 2, 3, "%02x", digest[i]);
+  return String(out);
+}
+bool sameSecret(const String& a, const String& b) {
+  if (a.length() != b.length()) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < a.length(); ++i) diff |= uint8_t(a[i]) ^ uint8_t(b[i]);
+  return diff == 0;
 }
 bool validPin(const String& pin) { return pin.length() > 0 && pin.length() <= 64; }
 bool primitive(JsonVariantConst value) {
@@ -70,6 +84,12 @@ bool RozakosIoT::authorize(AsyncWebServerRequest* req, JsonVariantConst body) {
   }
   return true;
 }
+bool RozakosIoT::localAllowed(AsyncWebServerRequest* req) {
+  if (_localSecret.isEmpty()) return true;
+  if (req->hasHeader("X-Device-Password") && sameSecret(req->header("X-Device-Password"), _localSecret)) return true;
+  req->send(401, "application/json", "{\"error\":\"Device password required\"}");
+  return false;
+}
 void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
   _manageWifi = manageWifi;
   if (_manageWifi) WiFi.mode(WIFI_AP_STA); // Initialize lwIP before either HTTP/WebSocket listener.
@@ -91,18 +111,21 @@ void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
   _http->on("/info", HTTP_GET, [this](AsyncWebServerRequest* req) {
     JsonDocument doc;
     doc["name"] = _name; doc["type"] = _type; doc["hardwareId"] = _hardwareId;
-    doc["protocol"] = 1; doc["sdk"] = "0.1.0";
+    doc["protocol"] = 1; doc["sdk"] = "0.2.0";
     auto pins = doc["pins"].to<JsonArray>(); for (const auto& item : _pins) pins.add(item.name);
-    auto caps = doc["capabilities"].to<JsonArray>(); caps.add("enrollment"); caps.add("local"); caps.add("cloud");
+    auto caps = doc["capabilities"].to<JsonArray>(); caps.add("enrollment"); caps.add("device-proof"); caps.add("local"); caps.add("cloud");
+    if (!_localSecret.isEmpty()) caps.add("local-password");
     jsonReply(req, doc);
   });
   _http->on("/state", HTTP_GET, [this](AsyncWebServerRequest* req) {
+    if (!localAllowed(req)) return;
     // Read the last published immutable snapshot, not application callbacks on the HTTP task.
     JsonDocument doc;
     xSemaphoreTake(_mutex, portMAX_DELAY); doc.set(_values); xSemaphoreGive(_mutex);
     jsonReply(req, doc);
   });
   auto* command = new AsyncCallbackJsonWebHandler("/command", [this](AsyncWebServerRequest* req, JsonVariant& body) {
+    if (!localAllowed(req)) return;
     if (!body["pin"].is<const char*>() || !validPin(body["pin"].as<String>()) || !primitive(body["value"])) { req->send(400, "application/json", "{\"error\":\"Invalid command\"}"); return; }
     if (_validate) {
       const char* error = _validate(body["pin"].as<String>(), body["value"]);
@@ -127,6 +150,19 @@ void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
     doc["pairingActive"] = pairingActive(); doc["job"] = _job; doc["error"] = _error;
     xSemaphoreGive(_mutex); jsonReply(req, doc);
   });
+  // Step 1: the app (holding the physical code) asks for the hash of a fresh
+  // device-generated receipt and binds it to the ticket over HTTPS. Only the
+  // device knows the preimage, so a ticket copied off the LAN cannot be claimed.
+  auto* receipt = new AsyncCallbackJsonWebHandler("/iot/receipt", [this](AsyncWebServerRequest* req, JsonVariant& body) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    if (!authorize(req, body)) { xSemaphoreGive(_mutex); return; }
+    if (!_key.isEmpty() || _job == "pending") { xSemaphoreGive(_mutex); req->send(409, "application/json", "{\"error\":\"Already linked or busy\"}"); return; }
+    _receipt = randomHex(); _ticket = ""; _job = "idle"; _error = "";
+    JsonDocument doc; doc["receiptHash"] = sha256Hex(_receipt);
+    xSemaphoreGive(_mutex); jsonReply(req, doc);
+  });
+  receipt->setMethod(HTTP_POST); receipt->setMaxContentLength(256); _http->addHandler(receipt);
+  // Step 2: the ticket bound to that receipt.
   auto* enroll = new AsyncCallbackJsonWebHandler("/iot/enroll", [this](AsyncWebServerRequest* req, JsonVariant& body) {
     xSemaphoreTake(_mutex, portMAX_DELAY);
     if (!authorize(req, body)) { xSemaphoreGive(_mutex); return; }
@@ -134,7 +170,8 @@ void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
     bool valid = token.length() == 64;
     for (char c : token) if (!isxdigit(c) || (c >= 'A' && c <= 'F')) valid = false;
     if (!_key.isEmpty() || _job == "pending" || !valid) { xSemaphoreGive(_mutex); req->send(409, "application/json", "{\"error\":\"Already linked, busy, or invalid ticket\"}"); return; }
-    _ticket = token; _receipt = randomHex(); _job = "pending"; _error = ""; _lastClaim = 0;
+    if (_receipt.isEmpty()) { xSemaphoreGive(_mutex); req->send(409, "application/json", "{\"error\":\"Setup receipt missing or reset. Start linking again.\"}"); return; }
+    _ticket = token; _job = "pending"; _error = ""; _lastClaim = 0;
     xSemaphoreGive(_mutex); req->send(202, "application/json", "{\"queued\":true}");
   });
   enroll->setMethod(HTTP_POST); enroll->setMaxContentLength(256); _http->addHandler(enroll);
@@ -155,6 +192,9 @@ void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
       JsonDocument frame; frame["pin"] = item.key().c_str(); frame["value"] = item.value();
       String json; serializeJson(frame, json); peer->text(json);
     }
+  });
+  _local.setFilter([this](AsyncWebServerRequest* req) {
+    return _localSecret.isEmpty() || (req->hasParam("token") && sameSecret(req->getParam("token")->value(), _localSecret));
   });
   _wsServer.addHandler(&_local); _wsServer.begin();
   _cloud.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
@@ -184,23 +224,43 @@ void RozakosIoT::begin(AsyncWebServer* existingServer, bool manageWifi) {
   }
   if (!existingServer) _http->begin();
 }
-void RozakosIoT::exchange() {
-  if (_job != "pending" || _ticket.isEmpty()) return;
+void RozakosIoT::startClaim() {
+  if (_claim || _job != "pending" || _ticket.isEmpty()) return;
   if (!save()) { _error = "Could not persist enrollment. Retry after checking device storage."; _job = "error"; return; }
   JsonDocument doc;
+  xSemaphoreTake(_mutex, portMAX_DELAY);
   doc["hardwareId"] = _hardwareId; doc["deviceType"] = _type;
   doc["token"] = _ticket; doc["receipt"] = _receipt;
+  xSemaphoreGive(_mutex);
   auto pins = doc["pins"].to<JsonArray>(); for (const auto& item : _pins) pins.add(item.name);
-  String body; serializeJson(doc, body);
-  WiFiClientSecure tls; tls.setCACert(ROZAKOS_ROOTS);
-  HTTPClient http; http.setTimeout(8000); http.setConnectTimeout(8000);
-  http.begin(tls, String("https://") + HOST + "/api/v1/devices/enrollments/claim");
-  http.addHeader("Content-Type", "application/json"); http.setUserAgent("RozakosIoT/0.1 ESP32");
-  const int status = http.POST(body);
+  _claim = new Claim();
+  serializeJson(doc, _claim->body);
+  if (xTaskCreate(claimTask, "rozakos-claim", 12288, _claim, 1, nullptr) != pdPASS) {
+    delete _claim; _claim = nullptr; _error = "Device busy; retrying enrollment.";
+  }
+}
+void RozakosIoT::claimTask(void* argument) {
+  auto* claim = static_cast<Claim*>(argument);
+  {
+    WiFiClientSecure tls; tls.setCACert(ROZAKOS_ROOTS);
+    HTTPClient http; http.setTimeout(8000); http.setConnectTimeout(8000);
+    http.begin(tls, String("https://") + HOST + "/api/v1/devices/enrollments/claim");
+    http.addHeader("Content-Type", "application/json"); http.setUserAgent("RozakosIoT/0.2 ESP32");
+    claim->status = http.POST(claim->body);
+    if (claim->status > 0) claim->response = http.getString();
+    http.end();
+  } // TLS and HTTP objects are destroyed before the task deletes itself.
+  claim->done.store(true);
+  vTaskDelete(nullptr);
+}
+void RozakosIoT::finishClaim() {
+  Claim* claim = _claim; _claim = nullptr;
+  const int status = claim->status;
   JsonDocument reply;
-  if (status > 0) deserializeJson(reply, http.getString());
-  http.end();
+  if (status > 0) deserializeJson(reply, claim->response);
+  delete claim;
   xSemaphoreTake(_mutex, portMAX_DELAY);
+  if (_job != "pending") { xSemaphoreGive(_mutex); return; } // Cleared by BOOT/USB reset meanwhile.
   if (status == 200 && reply["data"]["apiKey"].is<const char*>()) {
     _key = reply["data"]["apiKey"].as<String>(); _deviceId = reply["data"]["deviceId"].as<String>();
     String oldTicket = _ticket; _ticket = "";
@@ -270,7 +330,8 @@ void RozakosIoT::loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (time(nullptr) < 1700000000) { if (millis() - _lastWifi > 10000) { configTime(0, 0, "pool.ntp.org", "time.nist.gov"); _lastWifi = millis(); } }
     else {
-      if (_job == "pending" && (!_lastClaim || millis() - _lastClaim > 10000)) { _lastClaim = millis(); exchange(); }
+      if (_claim && _claim->done.load()) finishClaim();
+      if (_job == "pending" && !_claim && (!_lastClaim || millis() - _lastClaim > 10000)) { _lastClaim = millis(); startClaim(); }
       if (!_key.isEmpty() && !_cloudStarted) {
         _cloudStarted = true;
         _cloud.beginSslWithCA(HOST, 443, "/ws/device", ROZAKOS_ROOTS, "");

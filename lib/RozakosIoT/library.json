@@ -1,6 +1,6 @@
 {
   "name": "RozakosIoT",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ESP32 virtual pins, local/USB transport, protected Wi-Fi setup and cloud enrollment",
   "frameworks": "arduino",
   "platforms": "espressif32",

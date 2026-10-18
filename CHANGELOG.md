@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 - 2026-10-18
+
+- RozakosIoT library 0.2.0: cloud linking binds the ticket to a receipt only the board knows
+  (`POST /iot/receipt`), so a ticket seen on the LAN cannot be claimed. Needs IoT app 1.3.1.
+- Every link issues a fresh device key; the cloud claim runs on its own task so the display
+  keeps updating while it connects.
+- SSL.com roots added so a Cloudflare CA change does not break the TLS cloud connection.
+
 ## 1.2.0 - 2026-10-17
 
 - Use vendored RozakosIoT ESP32 library for local/USB and TLS cloud virtual pins.

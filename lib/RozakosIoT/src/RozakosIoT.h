@@ -4,6 +4,7 @@
 #include <ESPAsyncWebServer.h>
 #include <WebSocketsClient.h>
 #include <Preferences.h>
+#include <atomic>
 #include <functional>
 #include <vector>
 
@@ -33,9 +34,18 @@ class RozakosIoT {
   const String& setupCode() const { return _code; }
   const String& hardwareId() const { return _hardwareId; }
   void openPairing(); // Invoke only from a physical button, display menu or USB.
+  // Optional shared secret for local /state, /command and the port-81 WebSocket.
+  // Clients send it as the X-Device-Password header (WebSocket: ?token=...).
+  // Without it the local protocol trusts every client on the LAN.
+  void localSecret(const char* secret) { _localSecret = secret ? secret : ""; }
  private:
   struct Pin { String name; Writer write; };
   struct Work { String pin, json; };
+  // A cloud claim runs on its own short-lived task so TLS never blocks loop().
+  // Only status/response cross tasks; loop() applies the result.
+  struct Claim { String body; int status = 0; String response; std::atomic<bool> done{false}; };
+  Claim* _claim = nullptr;
+  String _localSecret;
   std::vector<Pin> _pins;
   std::vector<Work> _commands;
   Command _command;
@@ -60,7 +70,10 @@ class RozakosIoT {
   void snapshot(JsonDocument& doc);
   const char* execute(const String& pinName, JsonVariantConst value);
   bool authorize(AsyncWebServerRequest* request, JsonVariantConst body);
+  bool localAllowed(AsyncWebServerRequest* request);
   bool save();
-  void exchange();
+  void startClaim();
+  void finishClaim();
+  static void claimTask(void* argument);
   void serialLine(const String& line);
 };
